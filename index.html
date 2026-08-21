@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Голосование</title>
+<style>
+:root{
+  --paper:#edebe4;
+  --card:#ffffff;
+  --ink:#12161c;
+  --dim:#545c6a;
+  --line:rgba(18,22,28,.2);
+  --accent:#a8231a;
+  --picked:#f6efee;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+  min-height:100vh;background:var(--paper);color:var(--ink);font-family:var(--sans);
+  display:flex;flex-direction:column;align-items:center;padding:24px 16px 32px;
+}
+.top,#app,.foot{width:100%;max-width:560px}
+.top{
+  font-family:var(--mono);font-size:14px;line-height:1.4;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--accent);margin-bottom:24px;
+}
+h1{font-size:24px;font-weight:700;line-height:1.3;margin-bottom:24px}
+.opts{display:flex;flex-direction:column;gap:16px}
+.opt{
+  display:flex;align-items:center;gap:12px;width:100%;min-height:56px;padding:16px;
+  background:var(--card);border:1px solid var(--line);border-radius:0;
+  font-family:var(--sans);font-size:18px;font-weight:400;line-height:1.35;
+  color:var(--ink);text-align:left;cursor:pointer;
+}
+.opt .mark{display:none;flex:none}
+.opt.sel{border:2px solid var(--accent);background:var(--picked);padding:15px}
+.opt.sel .mark{display:block}
+.opt:disabled{cursor:default;opacity:.85}
+.state{padding:32px 0;font-size:16px;line-height:1.5;color:var(--dim)}
+.state b{color:var(--ink);font-weight:700}
+.dots{display:inline-block}
+.dots i{
+  display:inline-block;width:6px;height:6px;margin:0 2px;background:var(--dim);
+  animation:pulse 1.2s ease-in-out infinite;
+}
+.dots i:nth-child(2){animation-delay:.2s}
+.dots i:nth-child(3){animation-delay:.4s}
+@keyframes pulse{0%,100%{opacity:.2}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.6}}
+.hint{margin-bottom:16px;font-size:16px;line-height:1.5;color:var(--dim)}
+.field{display:flex;flex-direction:column;gap:16px}
+.entry{
+  width:100%;min-height:56px;padding:16px;background:var(--card);
+  border:1px solid var(--line);border-radius:0;
+  font-family:var(--mono);font-size:18px;line-height:1.35;color:var(--ink);
+}
+.send{
+  width:100%;min-height:56px;padding:16px;background:var(--card);
+  border:2px solid var(--accent);border-radius:0;
+  font-family:var(--sans);font-size:18px;font-weight:700;color:var(--accent);cursor:pointer;
+}
+.verdict{display:flex;align-items:flex-start;gap:12px;margin-top:24px;font-size:16px;line-height:1.5}
+.verdict .mark{flex:none;margin-top:2px}
+.verdict.is-ok{color:var(--ink)}
+.verdict.is-no{color:var(--dim)}
+.note{margin-top:16px;font-size:16px;line-height:1.5;color:var(--accent)}
+.local{
+  margin-bottom:16px;padding:8px 12px;border:1px solid var(--line);background:var(--card);
+  font-family:var(--mono);font-size:14px;line-height:1.4;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--dim);
+}
+.foot{
+  margin-top:auto;padding-top:32px;font-family:var(--mono);font-size:14px;line-height:1.4;
+  color:var(--dim);
+}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="top">ИИ ДЛЯ АУДИТОРОВ · LIVE</div>
+<div id="app" data-state="boot">
+  <div class="state">Подключаюсь<span class="dots"><i></i><i></i><i></i></span></div>
+</div>
+<div class="foot">голос анонимный · один голос на вопрос</div>
+
+<script src="config.js"></script>
+<script>
+(function(){
+"use strict";
+
+/* Адрес SDK держится ДВУМЯ ЦЕЛЫМИ ЛИТЕРАЛАМИ и никогда не собирается конкатенацией.
+   Причина не в стиле: регулярка загружающих конструкций слепа к `el.src = ...`,
+   зато соседняя проверка находит строку адреса и требует объявить, что зал теряет
+   без него. Адрес, склеенный из кусков, не поймает ни одна статическая проверка —
+   это самый тихий способ сломать офлайн-контракт.
+
+   Версия 10.14.1 выбрана осознанно: именно она отработала на боевом выступлении
+   владельца, и вся механика ниже написана на compat-поверхности (firebase.initializeApp,
+   firebase.database). Линия 12.x существует и compat-сборки в ней есть, но менять
+   проверенную боем версию ради номера на одноразовой аудиторной голосовалке нечего. */
+var SDK_APP = "https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js";
+var SDK_DB  = "https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js";
+
+/* Сколько страница имеет право показывать «Подключаюсь». По истечении — решённое
+   состояние, каким бы оно ни было. Без этого срока на площадке с перехватывающим
+   порталом загрузка SDK не падает, а ВИСИТ: экран ожидания без спиннера, который
+   ни один разбор исходника не заметит. */
+var SETTLE_MS = 2500;
+
+var SCREENS = {"m1-hw-a":{"expect":"8","fail":"Не сошлось. Перечитайте, чем «ответили неполно» отличается от «не ответили вовсе».","hint":"Короткая строка без пробелов по краям: одно число.","id":"m1-hw-a","kind":"homework","normalize":["trim","lower"],"ok":"Сошлось. Дальше сверьте ход по эталону, когда его откроют.","prompt":"Уровень A — сколько запросов пакета закрыто по предмету?"},"m1-hw-b":{"expect":"RFI-04","fail":"Не сошлось. Задвоение и уточнение различаются только чтением обоих ответов.","hint":"Короткая строка без пробелов по краям: один идентификатор вида RFI-NN.","id":"m1-hw-b","kind":"homework","normalize":["trim","lower"],"ok":"Сошлось. Дальше сверьте ход по эталону, когда его откроют.","prompt":"Уровень B — у какого запроса ответ задвоен?"},"m1-hw-c":{"expect":"m.radchenko","fail":"Не сошлось. Условий в предикате три, и сужает набор до одной строки третье.","hint":"Короткая строка без пробелов по краям: один логин.","id":"m1-hw-c","kind":"homework","normalize":["trim","lower"],"ok":"Сошлось. Дальше сверьте ход по эталону, когда его откроют.","prompt":"Уровень C — чья запись проходит предикат целиком?"},"m1-p1":{"id":"m1-p1","kind":"poll","options":["Не запускал ни разу","Пользуюсь в рабочих задачах","Собирал своё — скилл, агента, маршрутизацию"],"question":"Как у вас сейчас с агентами?"},"m1-p2":{"id":"m1-p2","kind":"poll","options":["Область — программа проверки","Фактура — наблюдение","Выгрузка — сверка с ожидаемым","RFI — сводка ответов"],"question":"Какая из четырёх рутин съедает у вас больше всего времени?"},"m1-p3":{"id":"m1-p3","kind":"poll","options":["Рамку запроса: цель, вход, форма результата","Правило в CLAUDE.md","И то и другое","Пока не решил"],"question":"Что примените на этой неделе?"},"m1-quiz1":{"id":"m1-quiz1","kind":"quiz","options":["Один раз при установке","В начале каждой сессии","Только по команде /memory","Каждый раз, когда вы упоминаете файл"],"question":"Когда Claude Code читает CLAUDE.md?"},"m1-quiz2":{"id":"m1-quiz2","kind":"quiz","options":["Вежливая формулировка","Названный файл, сценарий и признак готового результата","Максимально короткий текст","Перечисление всех файлов проекта"],"question":"Что делает запрос проверяемым?"},"m1-quiz3":{"id":"m1-quiz3","kind":"quiz","options":["Контекстом, который агент читает сам","Местом для правил, которых агент не угадает","Запретом, который действует независимо от решения агента","Файлом, который лежит в репозитории и версионируется"],"question":"Чем CLAUDE.md не является?"}};
+
+var app = document.getElementById("app");
+var cfg = window.POLL_CONFIG || {};
+var configured = !!(cfg.firebase && cfg.firebase.apiKey &&
+  String(cfg.firebase.apiKey).indexOf("ВСТАВЬ") === -1);
+
+var db = null;
+var currentId = null;
+var localOnly = false;
+var settleTimer = null;
+
+var SIGN_OK = '<svg class="mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10.5 L8 14.5 L16 5.5" fill="none" stroke="#a8231a" stroke-width="2"/></svg>';
+var SIGN_NO = '<svg class="mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5 L15 15 M15 5 L5 15" fill="none" stroke="#545c6a" stroke-width="2"/></svg>';
+
+function esc(s){
+  return String(s).replace(/[&<>"]/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c];
+  });
+}
+
+/* Единственная точка смены состояния. Она же снимает срок ожидания: состояние
+   объявлено решённым ровно тогда, когда на экране появилось что-то осмысленное. */
+function setState(name, html){
+  if (settleTimer !== null){ clearTimeout(settleTimer); settleTimer = null; }
+  app.setAttribute("data-state", name);
+  app.removeAttribute("data-verdict");
+  app.innerHTML = (localOnly ? '<div class="local">локальный показ · голос никуда не уходит</div>' : "") + html;
+}
+
+function stateBlock(text){
+  return '<div class="state">' + text + "</div>";
+}
+
+function showNotConfigured(){
+  setState("not-configured", stateBlock(
+    "Страница ещё не настроена. Организатор: заполните vote/config.js — адрес базы и адрес страницы."
+  ));
+}
+
+function showOffline(){
+  setState("offline", stateBlock(
+    "Не получилось связаться с базой. Ведущий соберёт ответы залом."
+  ));
+}
+
+function showClosed(){
+  setState("closed", stateBlock(
+    "Голосование пока не открыто. Ждём вопрос от ведущего."
+  ));
+}
+
+function showThanks(){
+  setState("thanks", stateBlock(
+    "<b>Голос принят.</b><br>Смотрите на экран — результат уже там.<br><br>" +
+    'Ждём следующий вопрос<span class="dots"><i></i><i></i><i></i></span>'
+  ));
+}
+
+function note(text){
+  var box = document.createElement("div");
+  box.className = "note";
+  box.textContent = text;
+  app.appendChild(box);
+}
+
+/* --- экран с вариантами: опрос и квиз устроены одинаково ---------------------------- */
+
+function showChoice(screen){
+  var html = "<h1>" + esc(screen.question) + '</h1><div class="opts">';
+  for (var i = 0; i < screen.options.length; i++){
+    html += '<button class="opt" type="button" data-i="' + i + '">' +
+            SIGN_OK + "<span>" + esc(screen.options[i]) + "</span></button>";
+  }
+  setState("choice", html + "</div>");
+
+  var buttons = app.querySelectorAll(".opt");
+  for (var k = 0; k < buttons.length; k++){
+    (function(btn){
+      btn.addEventListener("click", function(){ vote(screen.id, Number(btn.getAttribute("data-i")), btn); });
+    })(buttons[k]);
+  }
+}
+
+function pick(btn){
+  var all = app.querySelectorAll(".opt");
+  for (var i = 0; i < all.length; i++){ all[i].disabled = true; }
+  btn.classList.add("sel");
+}
+
+function vote(id, i, btn){
+  if (localOnly){ pick(btn); setTimeout(showThanks, 350); return; }
+  if (localStorage.getItem("voted_" + id)) { return; }
+  localStorage.setItem("voted_" + id, "1");
+  pick(btn);
+  db.ref("polls/" + id + "/counts/" + i).transaction(function(v){ return (v || 0) + 1; })
+    .then(function(){ setTimeout(showThanks, 450); })
+    .catch(function(){
+      /* Запись не прошла — метка снимается, вариант снова доступен. Иначе один отказ
+         базы навсегда вычёркивает участника из голосования. */
+      localStorage.removeItem("voted_" + id);
+      btn.classList.remove("sel");
+      var all = app.querySelectorAll(".opt");
+      for (var k = 0; k < all.length; k++){ all[k].disabled = false; }
+      note("Голос не записался. Нажмите вариант ещё раз.");
+    });
+}
+
+/* --- экран приёма ответа-результата -------------------------------------------------- */
+
+function normalize(value, steps){
+  var out = String(value === null || value === undefined ? "" : value);
+  for (var i = 0; i < steps.length; i++){
+    if (steps[i] === "trim"){ out = out.replace(/^\s+|\s+$/g, ""); }
+    else if (steps[i] === "lower"){ out = out.toLowerCase(); }
+  }
+  return out;
+}
+
+function showHomework(screen){
+  setState("homework",
+    "<h1>" + esc(screen.prompt) + "</h1>" +
+    '<div class="hint">' + esc(screen.hint) + "</div>" +
+    '<div class="field">' +
+      '<input class="entry" id="entry" type="text" autocomplete="off" autocapitalize="off" ' +
+      'autocorrect="off" spellcheck="false" aria-label="' + esc(screen.prompt) + '">' +
+      '<button class="send" type="button" id="send">Проверить</button>' +
+    "</div>"
+  );
+  var entry = document.getElementById("entry");
+  var send = document.getElementById("send");
+  send.addEventListener("click", function(){ submit(screen, entry.value); });
+  entry.addEventListener("keydown", function(e){
+    if (e.key === "Enter"){ submit(screen, entry.value); }
+  });
+}
+
+/* Сравнение выполняет сама страница: за ожидаемым значением она в базу не ходит.
+   В базу при совпадении уходит только инкремент счётчика сдавших числом — текст
+   того, что ввёл слушатель, наружу не пишется никогда. */
+function submit(screen, value){
+  var old = app.querySelector(".verdict");
+  if (old){ old.parentNode.removeChild(old); }
+
+  var matched = normalize(value, screen.normalize) === normalize(screen.expect, screen.normalize);
+  var box = document.createElement("div");
+  box.className = "verdict " + (matched ? "is-ok" : "is-no");
+  box.innerHTML = (matched ? SIGN_OK : SIGN_NO) + "<span>" + esc(matched ? screen.ok : screen.fail) + "</span>";
+  app.appendChild(box);
+  app.setAttribute("data-verdict", matched ? "ok" : "no");
+  if (!matched || localOnly){ return; }
+
+  if (localStorage.getItem("done_" + screen.id)){ return; }
+  localStorage.setItem("done_" + screen.id, "1");
+  db.ref("polls/" + screen.id + "/counts/0").transaction(function(v){ return (v || 0) + 1; })
+    .catch(function(){ localStorage.removeItem("done_" + screen.id); });
+}
+
+/* --- диспетчер экранов ---------------------------------------------------------------- */
+
+function show(screen){
+  if (screen.kind === "homework"){ showHomework(screen); return; }
+  showChoice(screen);
+}
+
+/* --- живой режим ---------------------------------------------------------------------- */
+
+function startLive(){
+  firebase.initializeApp(cfg.firebase);
+  db = firebase.database();
+
+  /* Ведущий обнулил голоса: метка сессии сменилась — снимаем «уже голосовал»
+     и «уже сдал», рисуем текущий экран заново. */
+  db.ref("state/session").on("value", function(snap){
+    var v = snap.val();
+    if (v === null || v === undefined){ return; }
+    if (String(v) === localStorage.getItem("pollSession")){ return; }
+    localStorage.setItem("pollSession", String(v));
+    var keys = Object.keys(localStorage);
+    for (var i = 0; i < keys.length; i++){
+      if (keys[i].indexOf("voted_") === 0 || keys[i].indexOf("done_") === 0){
+        localStorage.removeItem(keys[i]);
+      }
+    }
+    var again = currentId;
+    currentId = null;
+    if (again && SCREENS[again]){ currentId = again; show(SCREENS[again]); }
+  });
+
+  /* В базе лежит ТОЛЬКО идентификатор экрана. Текст вопроса и варианты берутся
+     из банка, собранного в эту страницу: правило, разрешающее записать в базу
+     произвольный объект с произвольным текстом, разрешает записать что угодно. */
+  db.ref("state/current").on("value", function(snap){
+    var id = snap.val();
+    if (!id || !SCREENS[id]){ currentId = null; showClosed(); return; }
+    if (id === currentId){ return; }
+    currentId = id;
+    if (SCREENS[id].kind !== "homework" && localStorage.getItem("voted_" + id)){ showThanks(); return; }
+    show(SCREENS[id]);
+  });
+}
+
+/* --- загрузка SDK: гонка со сроком ----------------------------------------------------- */
+
+function loadScript(src){
+  return new Promise(function(resolve, reject){
+    var el = document.createElement("script");
+    el.async = true;
+    el.src = src;
+    el.onload = function(){ resolve(); };
+    el.onerror = function(){ reject(new Error("sdk")); };
+    document.head.appendChild(el);
+  });
+}
+
+function boot(){
+  /* Локальный показ по якорю адреса: страница рисует названный экран без базы вовсе.
+     Нужен там, где базы ещё нет, — сухой прогон, проверка вёрстки на телефоне,
+     разбор задания. Голос при этом никуда не уходит, и страница об этом говорит. */
+  var wanted = String(location.hash || "").replace(/^#/, "");
+  if (wanted && SCREENS[wanted]){
+    localOnly = true;
+    show(SCREENS[wanted]);
+    return;
+  }
+
+  if (!configured){ showNotConfigured(); return; }
+
+  settleTimer = setTimeout(function(){ showOffline(); }, SETTLE_MS);
+
+  loadScript(SDK_APP)
+    .then(function(){ return loadScript(SDK_DB); })
+    .then(function(){
+      try { startLive(); }
+      catch (e) { showOffline(); }
+    })
+    .catch(function(){ showOffline(); });
+}
+
+boot();
+})();
+</script>
+</body>
+</html>
